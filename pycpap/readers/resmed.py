@@ -5,8 +5,9 @@ Supports ResMed S9, AirSense 10, and AirSense 11 devices.
 
 import asyncio
 import re
+import shutil
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pyedflib
@@ -77,22 +78,33 @@ class ResMedReader(CPAPReader):
         """Parse STR.edf and return a list of SleepSessions."""
         tmp_dir = await self._fetch_to_temp()
         try:
-            return await asyncio.get_event_loop().run_in_executor(
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
                 None, self._parse_str_edf, tmp_dir, since
             )
         finally:
-            import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     async def get_device_info(self) -> DeviceInfo:
         """Parse identification.txt and return DeviceInfo."""
         tmp_dir = await self._fetch_to_temp()
         try:
-            return await asyncio.get_event_loop().run_in_executor(
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
                 None, self._parse_identification, tmp_dir
             )
         finally:
-            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    async def get_all_data(self, since: date | None = None) -> tuple[list[SleepSession], DeviceInfo]:
+        """Fetch SD card files once and return both sessions and device info."""
+        tmp_dir = await self._fetch_to_temp()
+        try:
+            loop = asyncio.get_running_loop()
+            sessions = await loop.run_in_executor(None, self._parse_str_edf, tmp_dir, since)
+            device_info = await loop.run_in_executor(None, self._parse_identification, tmp_dir)
+            return sessions, device_info
+        finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def _parse_str_edf(self, data_dir: Path, since: date | None) -> list[SleepSession]:
@@ -146,7 +158,6 @@ class ResMedReader(CPAPReader):
                     continue
 
                 # Calculate session date
-                from datetime import timedelta
                 session_date = (start_dt + timedelta(days=i)).date()
                 if since is not None and session_date < since:
                     continue
@@ -159,7 +170,20 @@ class ResMedReader(CPAPReader):
                 session_start = midnight + timedelta(minutes=on_minutes)
                 session_end = midnight + timedelta(minutes=off_minutes)
 
-                duration = float(dur_sig[i]) if dur_sig is not None else (off_minutes - on_minutes)
+                # Fix sessions that cross midnight (session_end wraps to next day).
+                # Use strict < so zero-duration sessions (on == off) are not inflated
+                # by a full day.
+                if session_end < session_start:
+                    session_end += timedelta(days=1)
+
+                # Prefer the device-recorded duration signal; fall back to computing
+                # duration from the (already midnight-adjusted) timestamps so that
+                # sessions crossing midnight get the correct value instead of a
+                # negative or 1440-minute-off number.
+                if dur_sig is not None:
+                    duration = float(dur_sig[i])
+                else:
+                    duration = (session_end - session_start).total_seconds() / 60.0
 
                 # Mode mapping (ResMed encodes mode as integer)
                 mode_val = int(mode_sig[i]) if mode_sig is not None else 0
@@ -170,7 +194,7 @@ class ResMedReader(CPAPReader):
                         date=session_date,
                         session_start=session_start,
                         session_end=session_end,
-                        duration_minutes=abs(duration),
+                        duration_minutes=duration,
                         ahi=float(ahi_sig[i]) if ahi_sig is not None else 0.0,
                         apnea_index=float(ai_sig[i]) if ai_sig is not None else 0.0,
                         hypopnea_index=float(hi_sig[i]) if hi_sig is not None else 0.0,

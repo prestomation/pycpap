@@ -17,6 +17,30 @@ _SUMMARY_FILES = ["STR.EDF", "IDENTIFICATION.TXT"]
 _DIR_ENDPOINT = "/dir?dir=A:"
 _DOWNLOAD_ENDPOINT = "/download"
 
+# Maximum bytes allowed per downloaded file (50 MB)
+MAX_FILE_BYTES = 50 * 1024 * 1024
+
+
+def _safe_dest(dest_dir: Path, name: str) -> Path:
+    """Return dest_dir/name, raising ValueError on path traversal attempt.
+
+    Uses Path.relative_to() to validate containment without relying on
+    filesystem state (avoids TOCTOU with resolve()).  The dest_dir itself
+    is resolved once up-front; the constructed child path only uses the
+    sanitised basename and therefore can never escape dest_dir regardless
+    of symlinks in ``name``.
+    """
+    safe_name = Path(name).name  # takes only the final component, strips any ../
+    if not safe_name or safe_name in (".", ".."):
+        raise ValueError(f"Unsafe filename from EZ Share: {name!r}")
+    dest_dir_resolved = dest_dir.resolve()
+    candidate = dest_dir_resolved / safe_name
+    try:
+        candidate.relative_to(dest_dir_resolved)
+    except ValueError:
+        raise ValueError(f"Path traversal attempt blocked: {name!r}")
+    return candidate
+
 
 class HttpFetcher(CPAPFetcher):
     """Fetches CPAP data from an HTTP endpoint (EZ Share or compatible).
@@ -58,15 +82,35 @@ class HttpFetcher(CPAPFetcher):
         fdir: str,
         dest_path: Path,
     ) -> None:
-        """Download a single file from the SD card to dest_path."""
+        """Download a single file from the SD card to dest_path.
+
+        If an error occurs (including exceeding MAX_FILE_BYTES), the partially
+        written destination file is removed to avoid orphaned partial files.
+        """
         url = f"{self.base_url}{_DOWNLOAD_ENDPOINT}"
         params = {"fname": fname.upper(), "fdir": fdir}
         timeout = aiohttp.ClientTimeout(total=self.timeout_per_file)
-        async with session.get(url, params=params, timeout=timeout) as resp:
-            resp.raise_for_status()
-            async with aiofiles.open(dest_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(65536):
-                    await f.write(chunk)
+        try:
+            async with session.get(url, params=params, timeout=timeout) as resp:
+                resp.raise_for_status()
+                received = 0
+                async with aiofiles.open(dest_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(65536):
+                        # Check limit before writing so we never write a byte
+                        # beyond MAX_FILE_BYTES, even within a single chunk.
+                        if received + len(chunk) > MAX_FILE_BYTES:
+                            raise RuntimeError(
+                                f"Response exceeded {MAX_FILE_BYTES} bytes for {fname}"
+                            )
+                        received += len(chunk)
+                        await f.write(chunk)
+        except Exception:
+            # Clean up the partial file before propagating the error
+            try:
+                dest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     async def fetch(
         self,
@@ -81,7 +125,7 @@ class HttpFetcher(CPAPFetcher):
         async with aiohttp.ClientSession(timeout=total_timeout) as session:
             # Always download the summary files
             for fname in _SUMMARY_FILES:
-                dest_path = dest_dir / fname.upper()
+                dest_path = _safe_dest(dest_dir, fname.upper())
                 try:
                     await self._download_file(session, fname, "A:", dest_path)
                 except aiohttp.ClientError as exc:
@@ -102,6 +146,12 @@ class HttpFetcher(CPAPFetcher):
                             datalog_dest = dest_dir / "DATALOG"
                             datalog_dest.mkdir(exist_ok=True)
                             for subdir in subdirs:
+                                # Validate subdir name before using as path component
+                                try:
+                                    safe_subdir_path = _safe_dest(datalog_dest, subdir)
+                                except ValueError:
+                                    continue
+
                                 if since is not None:
                                     # Subdir names are typically YYYYMMDD
                                     try:
@@ -123,10 +173,14 @@ class HttpFetcher(CPAPFetcher):
                                     files = re.findall(
                                         r'href="[^"]*fname=([^"&]+)', sub_html, re.IGNORECASE
                                     )
-                                    sub_dest = datalog_dest / subdir
+                                    sub_dest = safe_subdir_path
                                     sub_dest.mkdir(exist_ok=True)
                                     for file in files:
-                                        file_dest = sub_dest / file.upper()
+                                        # Validate filename before use as path component
+                                        try:
+                                            file_dest = _safe_dest(sub_dest, file.upper())
+                                        except ValueError:
+                                            continue
                                         await self._download_file(
                                             session, file, f"A:/DATALOG/{subdir}", file_dest
                                         )

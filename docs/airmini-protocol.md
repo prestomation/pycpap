@@ -238,9 +238,24 @@ def parse_frame(data: bytes) -> tuple[int, bytes]:
 
 ## Community Research
 
-- **Apnea Board thread** — "AirMini Travel Data Extraction & Teardown" — 72+ pages since 2018. No working implementation published.
-- **OSCAR** — Does not support AirMini.
-- **No public open-source implementation exists** as of 2026-03-21. This is novel work.
+No public open-source implementation of the AirMini Bluetooth protocol exists as of 2026-03-21. This is novel work. Once the implementation is proven out, these are the places to share findings:
+
+### Threads to update
+
+| Community | Thread | Notes |
+|-----------|--------|-------|
+| **Apnea Board** | [AirMini Travel Data Extraction & Teardown](https://www.apneaboard.com/forums/Thread-AirMini-Travel-Data-Extraction-Teardown) | 72+ pages since 2018 — most active technical thread, primary place to post findings |
+| **CPAPtalk** | [Full sleep data for Resmed AirMini](https://www.cpaptalk.com/viewtopic/t171344/Full-sleep-data-for-Resmed-AirMini.html) | Older thread, some BT sniffing discussion |
+| **Reddit r/CPAP** | [Extract data from an Airmini](https://www.reddit.com/r/CPAP/comments/wb5h35/extract_data_from_an_airmini/) | Broader audience, good for awareness |
+| **Reddit r/CPAP** | [Resmed air mini and OSCAR](https://www.reddit.com/r/CPAP/comments/17vufd3/resmed_air_mini_and_oscar/) | OSCAR-focused audience |
+| **OSCAR GitLab** | [gitlab.com/pholy/OSCAR-code](https://gitlab.com/pholy/OSCAR-code) | If implementation matures, open a PR/issue for AirMini support |
+| **HA Community** | [ResMed CPAP Sensor integration in HACS](https://community.home-assistant.io/t/resmed-cpap-sensor-integration-in-hacs/373367) | Preston's own thread — natural place to announce AirMini support |
+
+### What to share when ready
+- Frame format + working Python parser code
+- SRP pairing implementation (once confirmed against real hardware)
+- VCID table (complete, including therapy data commands)
+- Reference to `prestomation/pycpap` library
 
 ---
 

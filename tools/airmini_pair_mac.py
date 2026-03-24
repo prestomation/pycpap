@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-AirMini pairing test — macOS version using IOBluetooth via pyobjc
+AirMini pairing — macOS, using lightblue for SPP server.
+
+Install: pip3 install lightblue
+NOTE: lightblue requires Bluetooth permission for Terminal in
+      System Settings → Privacy & Security → Bluetooth
 """
 
-import struct, os, json, time, threading
-import objc
-from Foundation import NSObject, NSRunLoop, NSDate
-import IOBluetooth
+import json, struct, os, threading
 
-AIRMINI_MAC = "04:87:27:BD:94:7D"
+try:
+    import lightblue
+except ImportError:
+    print("Install lightblue first: pip3 install lightblue")
+    exit(1)
+
 MAGIC = bytes([0xBE, 0xBA, 0xFE, 0xCA])
 
 # ── NCP framing ──────────────────────────────────────────────────────────────
@@ -27,101 +33,52 @@ def parse_frame(data: bytes) -> str | None:
     plen = struct.unpack_from('<H', data, pos + 6)[0]
     return data[pos + 16: pos + 16 + plen].decode('utf-8', errors='replace')
 
-# ── IOBluetooth RFCOMM delegate ───────────────────────────────────────────────
-class RFCOMMDelegate(NSObject):
-    def init(self):
-        self = objc.super(RFCOMMDelegate, self).init()
-        self._connected = False
-        self._data = b''
-        self._event = threading.Event()
-        return self
-
-    def rfcommChannelOpenComplete_status_(self, channel, status):
-        if status == 0:
-            self._connected = True
-            print("  RFCOMM channel open ✓")
-        else:
-            print(f"  RFCOMM open failed, status={status}")
-        self._event.set()
-
-    def rfcommChannelData_data_length_(self, channel, data, length):
-        self._data += bytes(objc.varlist(data, length))
-        self._event.set()
-
-    def rfcommChannelClosed_(self, channel):
-        print("  Channel closed")
-
-    def wait_for_data(self, timeout=5.0):
-        self._event.clear()
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            NSRunLoop.currentRunLoop().runUntilDate_(
-                NSDate.dateWithTimeIntervalSinceNow_(0.05))
-            if self._data:
-                data = self._data
-                self._data = b''
-                return data
-        return None
+def send_rpc(sock, method, params=None, id_=1):
+    msg = {"id": id_, "jsonrpc": "2.0", "method": method}
+    if params:
+        msg["params"] = params
+    sock.send(build_frame(json.dumps(msg)))
+    raw = b''
+    sock.settimeout(8.0)
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            raw += chunk
+            if MAGIC in raw:
+                text = parse_frame(raw)
+                if text:
+                    print(f"  ← {text[:200]}")
+                    try:
+                        return json.loads(text)
+                    except:
+                        return None
+    except Exception as e:
+        print(f"  recv timeout/error: {e}")
+    return None
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 PIN = input("Enter AirMini PIN: ").strip()
 
-print(f"\nLooking up device {AIRMINI_MAC}...")
-device = IOBluetooth.IOBluetoothDevice.deviceWithAddressString_(AIRMINI_MAC)
-if not device:
-    print("Device not found — make sure AirMini is in pairing mode and in range")
-    exit(1)
+print("\nStarting SPP server (channel 1)...")
+print("Put AirMini in pairing mode (hold power until PIN shows on display).")
+print("Waiting for AirMini to connect to your Mac...\n")
 
-delegate = RFCOMMDelegate.alloc().init()
+# lightblue acts as SPP server — AirMini connects to us
+server_sock = lightblue.socket(lightblue.RFCOMM)
+server_sock.bind(("", 0))
+server_sock.listen(1)
 
-print("Opening RFCOMM channel 1 (SPP)...")
-# PyObjC returns output params as a tuple: (IOReturn, channel)
-status, channel = device.openRFCOMMChannelSync_withChannelID_delegate_(None, 1, delegate)
+# Advertise the SPP service
+lightblue.advertise("BluetoothConnection", server_sock, lightblue.RFCOMM)
 
-if status != 0 or not delegate._connected:
-    # Try SDP-discovered channel
-    print(f"  Direct channel 1 failed (status={status}), trying SDP lookup...")
-    services = device.services()
-    rfcomm_channel = None
-    if services:
-        for svc in services:
-            # PyObjC: output param returned as tuple (IOReturn, channelID)
-            ret, ch = svc.getRFCOMMChannelID_(None)
-            if ret == 0 and ch > 0:
-                rfcomm_channel = ch
-                print(f"  Found SPP channel via SDP: {rfcomm_channel}")
-                break
-    if rfcomm_channel:
-        status, channel = device.openRFCOMMChannelSync_withChannelID_delegate_(
-            None, rfcomm_channel, delegate)
-    if status != 0:
-        print(f"  Failed to open RFCOMM (status={status})")
-        exit(1)
+print(f"Listening on channel {server_sock.getsockname()[1]}...")
+conn, addr = server_sock.accept()
+print(f"  ← Connected from {addr} ✓\n")
 
-# Give it a moment
-NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.5))
-
-def send_rpc(method, params=None, id_=1):
-    msg = {"id": id_, "jsonrpc": "2.0", "method": method}
-    if params:
-        msg["params"] = params
-    frame = build_frame(json.dumps(msg))
-    channel.writeSync_length_(frame, len(frame))
-    data = delegate.wait_for_data(timeout=8.0)
-    if not data:
-        print(f"  Timeout waiting for {method} response")
-        return None
-    text = parse_frame(data)
-    if text:
-        print(f"  ← {text[:200]}")
-        try:
-            return json.loads(text)
-        except:
-            return None
-    return None
-
-print("\nGetVersion →")
-result = send_rpc("GetVersion", id_=1)
+print("GetVersion →")
+result = send_rpc(conn, "GetVersion", id_=1)
 if result and "result" in result:
     fg = result["result"].get("FlowGenerator", {})
     ip = fg.get("IdentificationProfiles", {})
@@ -131,20 +88,20 @@ if result and "result" in result:
     print(f"  Firmware:    {sw}")
 
 print("\nGetPairKey →")
-result = send_rpc("GetPairKey", {"passKey": PIN}, id_=2)
+result = send_rpc(conn, "GetPairKey", {"passKey": PIN}, id_=2)
 if result and "result" in result:
     r = result["result"]
-    mpk = r.get("masterPairKey")
-    sk  = r.get("sessionKey")
+    mpk   = r.get("masterPairKey")
+    sk    = r.get("sessionKey")
     nonce = r.get("nonce")
     print(f"\n  ✅ masterPairKey  = {mpk}")
     print(f"     sessionKey     = {sk}")
     print(f"     nonce          = {nonce}")
     with open("airmini_keys.json", "w") as f:
-        json.dump({"mac": AIRMINI_MAC, "masterPairKey": mpk,
-                   "sessionKey": sk, "nonce": nonce}, f, indent=2)
+        json.dump({"masterPairKey": mpk, "sessionKey": sk, "nonce": nonce}, f, indent=2)
     print("\n  Saved → airmini_keys.json 🎉")
 else:
     print("  ❌ No masterPairKey in response")
 
-channel.closeChannel()
+conn.close()
+server_sock.close()

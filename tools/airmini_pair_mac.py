@@ -75,9 +75,8 @@ if not device:
 delegate = RFCOMMDelegate.alloc().init()
 
 print("Opening RFCOMM channel 1 (SPP)...")
-channel = IOBluetooth.IOBluetoothRFCOMMChannel.alloc().init()
-status = device.openRFCOMMChannelSync_withChannelID_delegate_(
-    objc.byref(channel), 1, delegate)
+# PyObjC returns output params as a tuple: (IOReturn, channel)
+status, channel = device.openRFCOMMChannelSync_withChannelID_delegate_(None, 1, delegate)
 
 if status != 0 or not delegate._connected:
     # Try SDP-discovered channel
@@ -92,8 +91,8 @@ if status != 0 or not delegate._connected:
                 print(f"  Found SPP channel via SDP: {rfcomm_channel}")
                 break
     if rfcomm_channel:
-        status = device.openRFCOMMChannelSync_withChannelID_delegate_(
-            objc.byref(channel), rfcomm_channel, delegate)
+        status, channel = device.openRFCOMMChannelSync_withChannelID_delegate_(
+            None, rfcomm_channel, delegate)
     if status != 0:
         print(f"  Failed to open RFCOMM (status={status})")
         exit(1)

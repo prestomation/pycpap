@@ -68,7 +68,7 @@ class Session(NSObject):
                 return text
         return None
 
-    def tx(self, payload: str):
+    def ncp_write(self, payload: str):
         frame = build_frame(payload)
         self.channel.writeSync_length_(frame, len(frame))
 
@@ -124,7 +124,7 @@ def rpc(method, params=None, id_=1):
     msg = {"id": id_, "jsonrpc": "2.0", "method": method}
     if params: msg["params"] = params
     print(f"  → {json.dumps(msg)[:120]}")
-    session.tx(json.dumps(msg))
+    session.ncp_write(json.dumps(msg))
     text = session.recv(timeout=8.0)
     if not text:
         print(f"  Timeout on {method}")

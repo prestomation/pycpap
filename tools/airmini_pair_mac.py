@@ -85,8 +85,9 @@ if status != 0 or not delegate._connected:
     rfcomm_channel = None
     if services:
         for svc in services:
-            ch = svc.getRFCOMMChannelID()
-            if ch > 0:
+            # PyObjC: output param returned as tuple (IOReturn, channelID)
+            ret, ch = svc.getRFCOMMChannelID_(None)
+            if ret == 0 and ch > 0:
                 rfcomm_channel = ch
                 print(f"  Found SPP channel via SDP: {rfcomm_channel}")
                 break

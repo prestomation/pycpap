@@ -64,7 +64,7 @@ class ChannelDelegate(NSObject):
                 return text
         return None
 
-    def send(self, payload: str):
+    def send_frame(self, payload: str):
         frame = build_frame(payload)
         self.channel.writeSync_length_(frame, len(frame))
 
@@ -118,7 +118,7 @@ def rpc(method, params=None, id_=1):
     msg = {"id": id_, "jsonrpc": "2.0", "method": method}
     if params:
         msg["params"] = params
-    _delegate.send(json.dumps(msg))
+    _delegate.send_frame(json.dumps(msg))
     text = _delegate.recv(timeout=8.0)
     if not text:
         print(f"  Timeout waiting for {method}")

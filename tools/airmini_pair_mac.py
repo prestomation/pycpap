@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-AirMini pairing — macOS, using IOBluetooth RFCOMM server.
-No extra packages needed beyond pyobjc (ships with macOS Python).
-
-Install deps:  pip3 install pyobjc-framework-IOBluetooth
+AirMini pairing — macOS IOBluetooth SPP server.
+pip3 install pyobjc-framework-IOBluetooth
 """
 
 import struct, os, json, time
@@ -13,14 +11,12 @@ import IOBluetooth
 
 MAGIC = bytes([0xBE, 0xBA, 0xFE, 0xCA])
 
-# ── NCP framing ──────────────────────────────────────────────────────────────
 def build_frame(payload: str, direction: int = 0x93) -> bytes:
     p = payload.encode()
     return (b'\x00\x00' + MAGIC +
             bytes([direction, 0x03]) +
             struct.pack('<H', len(p)) +
-            os.urandom(8) + p +
-            bytes([0x89]))
+            os.urandom(8) + p + bytes([0x89]))
 
 def parse_frame(data: bytes) -> str | None:
     pos = data.find(MAGIC)
@@ -28,23 +24,24 @@ def parse_frame(data: bytes) -> str | None:
     plen = struct.unpack_from('<H', data, pos + 6)[0]
     return data[pos + 16: pos + 16 + plen].decode('utf-8', errors='replace')
 
-# ── Delegate: handles the connected channel ───────────────────────────────────
-class ChannelDelegate(NSObject):
+class Session(NSObject):
     def init(self):
-        self = objc.super(ChannelDelegate, self).init()
+        self = objc.super(Session, self).init()
         self.channel = None
         self._buf = b''
-        self._ready = False
+        self.ready = False
         return self
 
+    # Called when AirMini opens a channel to us
     def rfcommChannelOpenComplete_status_(self, ch, status):
+        print(f"  rfcommChannelOpenComplete status={status:#010x}")
         if status == 0:
             self.channel = ch
-            self._ready = True
+            self.ready = True
             dev = ch.getDevice()
-            print(f"  AirMini connected: {dev.getName()} ✓")
+            print(f"  Connected: {dev.getName() if dev else 'unknown'} ✓")
         else:
-            print(f"  Channel open failed: {status:#010x}")
+            print(f"  Open failed: {status:#010x}")
 
     def rfcommChannelData_data_length_(self, ch, data, length):
         self._buf += bytes(objc.varlist(data, length))
@@ -52,9 +49,16 @@ class ChannelDelegate(NSObject):
     def rfcommChannelClosed_(self, ch):
         print("  Channel closed")
 
+    # Notification callback — incoming connection
+    def newChannelNotification_channel_(self, note, ch):
+        print(f"  Incoming RFCOMM channel! setting delegate...")
+        ch.setDelegate_(self)
+        # Open it
+        ch.openChannel()
+
     def recv(self, timeout=8.0):
-        deadline = time.time() + timeout
         self._buf = b''
+        deadline = time.time() + timeout
         while time.time() < deadline:
             NSRunLoop.currentRunLoop().runUntilDate_(
                 NSDate.dateWithTimeIntervalSinceNow_(0.05))
@@ -64,72 +68,72 @@ class ChannelDelegate(NSObject):
                 return text
         return None
 
-    def send_frame(self, payload: str):
+    def tx(self, payload: str):
         frame = build_frame(payload)
         self.channel.writeSync_length_(frame, len(frame))
 
-# ── Notification handler: fires when AirMini opens a channel ──────────────────
-_delegate = None  # keep alive
-
-class NotificationHandler(NSObject):
-    def rfcommChannelNotification_channel_(self, note, channel):
-        global _delegate
-        print(f"  Incoming RFCOMM connection!")
-        channel.setDelegate_(_delegate)
-        _delegate.channel = channel
-        _delegate._ready = True
-        dev = channel.getDevice()
-        print(f"  Device: {dev.getName() if dev else 'unknown'} ✓")
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 PIN = input("Enter AirMini PIN: ").strip()
+session = Session.alloc().init()
 
-_delegate = ChannelDelegate.alloc().init()
-handler   = NotificationHandler.alloc().init()
-
-# Register to receive notifications for any incoming RFCOMM channel on ch 1
-# kIOBluetoothUserNotificationChannelDirectionIncoming = 2
+# Register for ALL incoming RFCOMM channels (channelID=0 = any)
+print("\nRegistering for incoming RFCOMM connections (any channel)...")
 note = IOBluetooth.IOBluetoothRFCOMMChannel.registerForChannelOpenNotifications_selector_withChannelID_direction_(
-    handler,
-    "rfcommChannelNotification:channel:",
-    1,    # channel ID (SPP)
-    2     # incoming direction
+    session,
+    "newChannelNotification:channel:",
+    0,   # 0 = any channel
+    2    # kIOBluetoothUserNotificationChannelDirectionIncoming
 )
+print(f"  Notification registered: {note}")
 
-print("\nWaiting for AirMini to connect (up to 60s)...")
-print("→ Put AirMini in pairing mode: hold power button until PIN shows on screen")
-print("→ On your Mac: System Settings → Bluetooth → pair with 'ResMed 254298'\n")
+# Also check if AirMini already has an open connection
+print("\nChecking existing BT connections...")
+paired = IOBluetooth.IOBluetoothDevice.pairedDevices()
+if paired:
+    for dev in paired:
+        name = dev.getName() or ""
+        if "ResMed" in name or "254298" in name:
+            print(f"  Found: {name} — connected={dev.isConnected()}")
+            if dev.isConnected():
+                # Try opening RFCOMM on any channel
+                for ch_id in [1, 2, 3, 4]:
+                    print(f"  Trying RFCOMM channel {ch_id}...")
+                    status, ch = dev.openRFCOMMChannelSync_withChannelID_delegate_(
+                        None, ch_id, session)
+                    print(f"    status={status:#010x}")
+                    if status == 0 and ch:
+                        session.channel = ch
+                        session.ready = True
+                        print(f"  Opened channel {ch_id} ✓")
+                        break
+
+print("\nWaiting for AirMini to connect (60s)...")
+print("If not already paired: System Settings → Bluetooth → pair 'ResMed 254298'")
+print("Then put AirMini in pairing mode (hold power until PIN shows)\n")
 
 deadline = time.time() + 60
 while time.time() < deadline:
     NSRunLoop.currentRunLoop().runUntilDate_(
         NSDate.dateWithTimeIntervalSinceNow_(0.1))
-    if _delegate._ready:
+    if session.ready:
         break
 else:
-    print("Timed out — AirMini did not connect.")
-    print("Make sure:")
-    print("  1. AirMini is in pairing mode (PIN visible on its display)")
-    print("  2. Mac's Bluetooth is ON")
-    print("  3. 'ResMed 254298' is paired in System Settings → Bluetooth")
+    print("Timed out. AirMini did not connect.")
     exit(1)
 
 def rpc(method, params=None, id_=1):
     msg = {"id": id_, "jsonrpc": "2.0", "method": method}
-    if params:
-        msg["params"] = params
-    _delegate.send_frame(json.dumps(msg))
-    text = _delegate.recv(timeout=8.0)
+    if params: msg["params"] = params
+    print(f"  → {json.dumps(msg)[:120]}")
+    session.tx(json.dumps(msg))
+    text = session.recv(timeout=8.0)
     if not text:
-        print(f"  Timeout waiting for {method}")
+        print(f"  Timeout on {method}")
         return None
     print(f"  ← {text[:200]}")
-    try:
-        return json.loads(text)
-    except:
-        return None
+    try: return json.loads(text)
+    except: return None
 
-print("\nGetVersion →")
+print("GetVersion →")
 r = rpc("GetVersion", id_=1)
 if r and "result" in r:
     fg = r["result"].get("FlowGenerator", {})
@@ -141,17 +145,14 @@ print("\nGetPairKey →")
 r = rpc("GetPairKey", {"passKey": PIN}, id_=2)
 if r and "result" in r:
     res = r["result"]
-    mpk   = res.get("masterPairKey")
-    sk    = res.get("sessionKey")
-    nonce = res.get("nonce")
+    mpk, sk, nonce = res.get("masterPairKey"), res.get("sessionKey"), res.get("nonce")
     print(f"\n  ✅ masterPairKey = {mpk}")
     print(f"     sessionKey    = {sk}")
-    print(f"     nonce         = {nonce}")
     with open("airmini_keys.json", "w") as f:
         json.dump({"masterPairKey": mpk, "sessionKey": sk, "nonce": nonce}, f, indent=2)
-    print("\n  Saved → airmini_keys.json 🎉")
+    print("  Saved → airmini_keys.json 🎉")
 else:
     print("  ❌ No masterPairKey in response")
 
-if _delegate.channel:
-    _delegate.channel.closeChannel()
+if session.channel:
+    session.channel.closeChannel()

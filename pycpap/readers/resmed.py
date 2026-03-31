@@ -58,6 +58,9 @@ def _read_signal(f: pyedflib.EdfReader, idx: int) -> np.ndarray:
 class ResMedReader(CPAPReader):
     """Parses ResMed CPAP therapy data from STR.edf and identification.txt.
 
+    Supports fetching via a CPAPFetcher (network/mount) or parsing from raw
+    bytes already in memory (useful when data was fetched by an external agent).
+
     Args:
         fetcher: A CPAPFetcher instance used to download/copy SD card files.
         scope: FetchScope to use when calling fetcher.fetch().
@@ -66,6 +69,62 @@ class ResMedReader(CPAPReader):
     def __init__(self, fetcher: CPAPFetcher, scope: FetchScope = FetchScope.SUMMARY_ONLY) -> None:
         self.fetcher = fetcher
         self.scope = scope
+
+    @classmethod
+    def from_bytes(
+        cls,
+        edf_data: bytes,
+        identification_data: bytes | None = None,
+        since: date | None = None,
+    ) -> tuple[list[SleepSession], DeviceInfo | None]:
+        """Parse EDF bytes directly without a fetcher.
+
+        Use this when an external agent (e.g. an ESP32 WiFi bridge) has already
+        downloaded the EDF file and delivered the raw bytes via HTTP POST.
+
+        Args:
+            edf_data: Raw bytes of the STR.EDF file.
+            identification_data: Raw bytes of the IDENTIFICATION.TXT file
+                (optional; primarily used for device info when fetcher is absent).
+            since: Only return sessions on or after this date (optional).
+
+        Returns:
+            A tuple of (list of SleepSession, DeviceInfo). DeviceInfo may be
+            None if identification_data is not provided.
+
+        Raises:
+            ValueError: If edf_data is empty or not a valid EDF file.
+        """
+        if not edf_data:
+            raise ValueError("edf_data must be non-empty bytes")
+
+        tmp = Path(tempfile.mkdtemp(prefix="pycpap_bytes_"))
+        try:
+            edf_path = tmp / "STR.EDF"
+            edf_path.write_bytes(edf_data)
+
+            id_path = tmp / "IDENTIFICATION.TXT"
+            if identification_data:
+                id_path.write_bytes(identification_data)
+
+            # Build a minimal reader instance to call the sync parsers
+            class _NoOpFetcher(CPAPFetcher):
+                async def fetch(self, dest_dir, since=None, scope=FetchScope.SUMMARY_ONLY):
+                    pass
+
+            reader = cls(_NoOpFetcher())
+            try:
+                sessions = reader._parse_str_edf(tmp, since)
+            except OSError as exc:
+                raise ValueError(f"edf_data is not a valid EDF file: {exc}") from exc
+            try:
+                device_info = reader._parse_identification(tmp) if identification_data else None
+            except FileNotFoundError:
+                device_info = None
+            return sessions, device_info
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
     async def _fetch_to_temp(self) -> Path:
         """Fetch SD card files to a temporary directory and return its path."""

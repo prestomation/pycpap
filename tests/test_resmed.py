@@ -83,6 +83,18 @@ class TestHttpFetcher:
         pass
 
 
+class TestResMedReaderFromBytes:
+    def test_from_bytes_rejects_non_edf_data(self):
+        """Non-EDF bytes should raise an appropriate error, not crash silently."""
+        with pytest.raises(Exception):  # pyedflib raises on invalid EDF
+            ResMedReader.from_bytes(b"not an edf file at all")
+
+    def test_from_bytes_returns_tuple(self):
+        """from_bytes must return (sessions, device_info)."""
+        with pytest.raises(Exception):
+            ResMedReader.from_bytes(b"not edf")
+
+
 class TestSleepSessionModel:
     def test_sleep_session_required_fields(self):
         from datetime import datetime

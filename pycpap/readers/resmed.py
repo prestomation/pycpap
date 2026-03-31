@@ -91,7 +91,13 @@ class ResMedReader(CPAPReader):
         Returns:
             A tuple of (list of SleepSession, DeviceInfo). DeviceInfo may be
             None if identification_data is not provided.
+
+        Raises:
+            ValueError: If edf_data is empty or not a valid EDF file.
         """
+        if not edf_data:
+            raise ValueError("edf_data must be non-empty bytes")
+
         tmp = Path(tempfile.mkdtemp(prefix="pycpap_bytes_"))
         try:
             edf_path = tmp / "STR.EDF"
@@ -107,8 +113,14 @@ class ResMedReader(CPAPReader):
                     pass
 
             reader = cls(_NoOpFetcher())
-            sessions = reader._parse_str_edf(tmp, since)
-            device_info = reader._parse_identification(tmp) if identification_data else None
+            try:
+                sessions = reader._parse_str_edf(tmp, since)
+            except OSError as exc:
+                raise ValueError(f"edf_data is not a valid EDF file: {exc}") from exc
+            try:
+                device_info = reader._parse_identification(tmp) if identification_data else None
+            except FileNotFoundError:
+                device_info = None
             return sessions, device_info
         finally:
             import shutil

@@ -1,11 +1,9 @@
 """LocalFetcher — copies CPAP data from a locally mounted SD card path."""
 
+import asyncio
 import shutil
 from datetime import date
 from pathlib import Path
-
-import aiofiles
-import aiofiles.os
 
 from .base import CPAPFetcher, FetchScope
 
@@ -34,7 +32,11 @@ class LocalFetcher(CPAPFetcher):
     ) -> None:
         """Copy CPAP files from the mounted path to dest_dir."""
         dest_dir.mkdir(parents=True, exist_ok=True)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._sync_copy, dest_dir, since, scope)
 
+    def _sync_copy(self, dest_dir: Path, since: date | None, scope: FetchScope) -> None:
+        """Synchronous file copy — runs in executor to avoid blocking event loop."""
         # Copy summary files (case-insensitive search for portability)
         for fname in _SUMMARY_FILES:
             src = self._find_file(self.path, fname)
@@ -44,7 +46,7 @@ class LocalFetcher(CPAPFetcher):
                     "Ensure the SD card is mounted and the path is correct."
                 )
             dest = dest_dir / fname.upper()
-            await self._copy_file(src, dest)
+            shutil.copy2(src, dest)
 
         if scope in (FetchScope.LAST_7_DAYS, FetchScope.ALL_AVAILABLE):
             datalog_src = self.path / "DATALOG"
@@ -69,7 +71,7 @@ class LocalFetcher(CPAPFetcher):
                     sub_dest.mkdir(exist_ok=True)
                     for file in subdir.iterdir():
                         if file.is_file():
-                            await self._copy_file(file, sub_dest / file.name.upper())
+                            shutil.copy2(file, sub_dest / file.name.upper())
 
     @staticmethod
     def _find_file(directory: Path, name: str) -> Path | None:
@@ -79,14 +81,3 @@ class LocalFetcher(CPAPFetcher):
             if candidate.name.upper() == name_upper and candidate.is_file():
                 return candidate
         return None
-
-    @staticmethod
-    async def _copy_file(src: Path, dest: Path) -> None:
-        """Async file copy using aiofiles."""
-        async with aiofiles.open(src, "rb") as fsrc:
-            async with aiofiles.open(dest, "wb") as fdest:
-                while True:
-                    chunk = await fsrc.read(65536)
-                    if not chunk:
-                        break
-                    await fdest.write(chunk)

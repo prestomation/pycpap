@@ -1,10 +1,18 @@
 # pycpap
 
-An async Python library for fetching and parsing CPAP therapy data from ResMed SD cards.
+An async Python library for fetching and parsing CPAP therapy data from ResMed devices.
 
-Supports ResMed S9, AirSense 10, and AirSense 11 devices. Can fetch data via HTTP (EZ Share WiFi SD card adapters) or directly from a locally mounted SD card.
+**pycpap is a standalone library.** It has no dependency on Home Assistant or any specific application. It can be used in scripts, data analysis pipelines, dashboards, or any Python application. The [ha-cpap-local](https://github.com/prestomation/ha-cpap-local) Home Assistant integration is one consumer of this library — not the other way around.
 
-> **Note:** WiFi adapter configuration and network routing are out of scope for this library. See your adapter's documentation for setup instructions. Popular options include EZ Share WiFi SD card adapters.
+## Supported Devices
+
+### SD Card (via WiFi adapter or direct mount)
+- ResMed AirSense 10 (AutoSet, Elite, For Her, CS PaceWave)
+- ResMed AirSense 11 (AutoSet, AutoSet For Her)
+- ResMed S9 series (AutoSet, Elite, VPAP, Escape)
+
+### Bluetooth (planned — see [docs/airmini-protocol.md](docs/airmini-protocol.md))
+- ResMed AirMini — data fetched directly from the device over Bluetooth Classic SPP. No SD card or WiFi adapter required. The AirMini stores 365 days of therapy data on-device, so data can be pulled retroactively after travel.
 
 ## Installation
 
@@ -18,23 +26,20 @@ pip install pycpap
 
 ```python
 import asyncio
-from pycpap import ResMedReader, HttpFetcher, FetchScope
+from pycpap import ResMedReader, HttpFetcher
 
 async def main():
-    # Point at your EZ Share adapter's IP address
     fetcher = HttpFetcher("http://192.168.4.1")
     reader = ResMedReader(fetcher)
 
-    # Get all sessions from the last 7 days
     sessions = await reader.get_sessions()
     for session in sessions:
         print(f"{session.date}: AHI={session.ahi:.1f}, "
               f"Usage={session.duration_minutes/60:.1f}h, "
               f"Mode={session.mode}")
 
-    # Get device info
     device = await reader.get_device_info()
-    print(f"Device: {device.model} (S/N: {device.serial}, FW: {device.firmware})")
+    print(f"Device: {device.model} (S/N: {device.serial})")
 
 asyncio.run(main())
 ```
@@ -42,27 +47,17 @@ asyncio.run(main())
 ### Fetch from a Locally Mounted SD Card
 
 ```python
-import asyncio
 from pycpap import ResMedReader, LocalFetcher
 
-async def main():
-    # Path to the mounted SD card root
-    fetcher = LocalFetcher("/media/username/RESMED_SD")
-    reader = ResMedReader(fetcher)
-
-    sessions = await reader.get_sessions()
-    for session in sessions:
-        print(f"{session.date}: AHI={session.ahi:.1f}, "
-              f"Leak 95th={session.mask_leak_95:.1f} L/min")
-
-asyncio.run(main())
+fetcher = LocalFetcher("/media/username/RESMED_SD")
+reader = ResMedReader(fetcher)
+sessions = await reader.get_sessions()
 ```
 
 ### Filter by Date
 
 ```python
 from datetime import date
-
 sessions = await reader.get_sessions(since=date(2024, 1, 1))
 ```
 
@@ -70,7 +65,6 @@ sessions = await reader.get_sessions(since=date(2024, 1, 1))
 
 ```python
 from pycpap import FetchScope
-
 reader = ResMedReader(fetcher, scope=FetchScope.LAST_7_DAYS)
 sessions = await reader.get_sessions()
 ```
@@ -90,7 +84,7 @@ sessions = await reader.get_sessions()
 | `hypopnea_index` | `float` | Hypopnea Index |
 | `mask_leak_median` | `float` | Median mask leak (L/min) |
 | `mask_leak_95` | `float` | 95th percentile mask leak |
-| `pressure_median` | `float` | Median pressure (cmH2O) |
+| `pressure_median` | `float` | Median pressure (cmH₂O) |
 | `pressure_95` | `float` | 95th percentile pressure |
 | `mode` | `str` | Therapy mode (CPAP, APAP, AutoSet, etc.) |
 | `respiratory_rate` | `float \| None` | Respiratory rate (ASV/iVAPS only) |
@@ -105,11 +99,28 @@ sessions = await reader.get_sessions()
 | `serial` | `str` | Serial number |
 | `firmware` | `str` | Firmware version |
 
-## Supported Devices
+## Architecture
 
-- ResMed AirSense 10 (AutoSet, Elite, For Her, CS PaceWave)
-- ResMed AirSense 11 (AutoSet, AutoSet For Her)
-- ResMed S9 series (AutoSet, Elite, VPAP, Escape)
+pycpap separates **fetching** from **parsing**:
+
+```
+CPAPFetcher          CPAPReader
+─────────────        ─────────────────
+HttpFetcher    →     ResMedReader  →  list[SleepSession]
+LocalFetcher   →                  →  DeviceInfo
+AirMiniFetcher →     (planned)
+(planned, BT)
+```
+
+- **Fetchers** copy raw SD card files (or retrieve data over Bluetooth) to a temporary directory
+- **Readers** parse the raw files into typed `SleepSession` objects
+- **Your app** (or the HA integration) uses the reader directly — no knowledge of the underlying fetch mechanism required
+
+> **WiFi note:** Network routing to reach your EZ Share adapter is out of scope. The library just takes a URL or path. See your adapter's documentation for setup.
+
+## Documentation
+
+- [`docs/airmini-protocol.md`](docs/airmini-protocol.md) — AirMini Bluetooth protocol reverse engineering notes (NCP framing, VCID table, SRP auth, implementation plan)
 
 ## Development
 

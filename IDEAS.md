@@ -1,5 +1,9 @@
 # IDEAS.md — pycpap Future Features
 
+## AirMini Bluetooth Support (Future — Research Phase)
+
+ResMed's travel CPAP has no SD card — data is accessed via Bluetooth Classic SPP using a JSON-RPC API. The protocol stack has been partially reverse engineered from the app APK; the main blocker is the proprietary `libfiglib.so` NCP framing layer. Pairing requires a 4-digit PIN shown on the device display, which needs to be a first-class argument in `AirMiniFetcher.pair(pin)`. No public implementation exists. See [`docs/airmini-protocol.md`](docs/airmini-protocol.md) for full research notes.
+
 ## Device Support
 - **Philips Respironics support** — DreamStation 1/2, System One. Respironics uses a different SD card format (P-Series .001 files + summary .csv). Would require a separate `RespironicsReader`.
 - **F&P (Fisher & Paykel) support** — Icon series devices.
